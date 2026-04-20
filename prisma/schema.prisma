@@ -1,0 +1,105 @@
+// Internal onboarding tool DB schema.
+// Stores which clients have been provisioned and the per-step history.
+// SQLite for dev; Postgres migration is a later phase.
+
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Client {
+  id             String @id @default(cuid())
+  provisioningId String @unique // idempotency key; surfaced to the form for retry reuse
+  slug           String @unique
+  name           String
+
+  // Company basics (step 1 — Client)
+  industry String?
+  country  String?
+  timezone String  @default("Etc/UTC")
+
+  // Primary contact (step 2 — Contact)
+  adminName  String
+  adminEmail String
+  adminPhone String?
+  /// DEPRECATED — superseded by teamGithubUsernames. Left in the schema so
+  /// the migration is non-destructive while the dev server holds the SQLite
+  /// file open. Will be dropped in a follow-up migration.
+  clientGithubUsername   String?
+  /// DEPRECATED — superseded by hardcoded "push" permission for all invites.
+  clientGithubPermission String  @default("push")
+  /// Comma-separated list of GitHub usernames to invite as collaborators on
+  /// the new repo (the client's username + the operator's team members).
+  /// SQLite has no arrays, so comma-separated like `enabledModules`. Each
+  /// entry is invited as a `push` collaborator. Empty / null means nobody is
+  /// invited automatically — the staff user can still add people on GitHub.
+  teamGithubUsernames String?
+
+  // Branding (step 3 — Branding)
+  brandPrimaryColor   String
+  brandSecondaryColor String?
+  brandLogoUrl        String?
+  brandFaviconUrl     String?
+
+  // Features & plan (step 4 — Features)
+  enabledModules String // comma-separated module keys (SQLite has no arrays)
+  planTier       String @default("starter") // starter | pro | enterprise
+  userSeats      Int    @default(5)
+  goLiveDate     DateTime?
+  notes          String?
+
+  // Populated after a successful push
+  githubRepoUrl String?
+  githubRepoId  String?
+  commitSha     String?
+
+  // Preview session (Phase B/C — transient; cleared after approve or cancel)
+  previewSessionId   String?   @unique
+  previewStartedAt   DateTime?
+  previewStoppedAt   DateTime?
+
+  // Lifecycle
+  status         String // PENDING | PREVIEW_PENDING | READY | FAILED | CANCELLED
+  failureStep    String?
+  friendlyError  String? // shown to staff; never a stack trace
+  warnings       String? // newline-separated soft-failure notes (e.g. invite failed)
+  referenceId    String? // short support ref for failures
+  provisionedBy  String // GitHub login of the staff user
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  logs ProvisioningStepLog[]
+}
+
+model ProvisioningStepLog {
+  id           String    @id @default(cuid())
+  clientId     String
+  client       Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  step         String // validate | slug-check | clone | validate-template | write-seed | git-reinit | create-repo | push | finalize | rollback
+  status       String // STARTED | OK | FAILED
+  durationMs   Int?
+  truncatedLog String? // scrubbed git stdout/stderr, hard-capped at 8 KB in the service layer
+  error        String? // scrubbed technical error
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+
+  @@index([clientId])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorLogin String // GitHub login; enforced append-only in the service layer
+  action     String // CLIENT_PROVISIONED | CLIENT_PROVISIONING_FAILED | CLIENT_RETRIED | CLIENT_PREVIEW_APPROVED | CLIENT_PROVISIONING_CANCELLED
+  targetSlug String
+  metadata   String? // JSON blob
+  createdAt  DateTime @default(now())
+
+  @@index([targetSlug])
+  @@index([actorLogin])
+}
