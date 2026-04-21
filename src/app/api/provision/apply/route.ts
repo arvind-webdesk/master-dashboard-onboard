@@ -65,6 +65,38 @@ const applySchema = z.object({
   brandSecondaryColor: optionalHexColor,
   brandLogoUrl: optionalUrl,
   brandFaviconUrl: optionalUrl,
+  dashboardType: z.enum(['custom', 'middleware', 'saas']).default('custom'),
+  integrations: z
+    .object({
+      shopify: z.object({
+        enabled: z.boolean(),
+        storeUrl: z.preprocess(emptyToUndef, z.string().optional()),
+        sync: z.object({
+          products: z.boolean(),
+          orders: z.boolean(),
+          customers: z.boolean(),
+        }),
+      }),
+      bigcommerce: z.object({
+        enabled: z.boolean(),
+        storeHash: z.preprocess(emptyToUndef, z.string().optional()),
+        sync: z.object({
+          products: z.boolean(),
+          orders: z.boolean(),
+          customers: z.boolean(),
+        }),
+      }),
+    })
+    .default({
+      shopify: {
+        enabled: false,
+        sync: { products: false, orders: false, customers: false },
+      },
+      bigcommerce: {
+        enabled: false,
+        sync: { products: false, orders: false, customers: false },
+      },
+    }),
   enabledModules: z.array(z.string().min(1)).min(1),
   planTier: z.enum(['starter', 'pro', 'enterprise']),
   userSeats: z.number().int().min(1).max(10000),
@@ -94,6 +126,16 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
+  // Strip stale integrations payload when the dashboard isn't middleware, so
+  // leftover enabled flags / invalid URLs from an abandoned step don't fail validation.
+  if (body && typeof body === 'object' && (body as Record<string, unknown>).dashboardType !== 'middleware') {
+    const emptySync = { products: false, orders: false, customers: false };
+    (body as Record<string, unknown>).integrations = {
+      shopify: { enabled: false, sync: emptySync },
+      bigcommerce: { enabled: false, sync: emptySync },
+    };
+  }
+
   const parsed = applySchema.safeParse(body);
   if (!parsed.success) {
     const fieldErrors: Record<string, string> = {};
@@ -121,6 +163,19 @@ export async function POST(req: Request): Promise<Response> {
       brandSecondaryColor: parsed.data.brandSecondaryColor ?? null,
       brandLogoUrl: parsed.data.brandLogoUrl ?? null,
       brandFaviconUrl: parsed.data.brandFaviconUrl ?? null,
+      dashboardType: parsed.data.dashboardType,
+      integrations: {
+        shopify: {
+          enabled: parsed.data.integrations.shopify.enabled,
+          storeUrl: parsed.data.integrations.shopify.storeUrl ?? null,
+          sync: parsed.data.integrations.shopify.sync,
+        },
+        bigcommerce: {
+          enabled: parsed.data.integrations.bigcommerce.enabled,
+          storeHash: parsed.data.integrations.bigcommerce.storeHash ?? null,
+          sync: parsed.data.integrations.bigcommerce.sync,
+        },
+      },
       enabledModules: parsed.data.enabledModules,
       planTier: parsed.data.planTier,
       userSeats: parsed.data.userSeats,

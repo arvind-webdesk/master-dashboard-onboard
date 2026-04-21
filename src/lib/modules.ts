@@ -3,48 +3,47 @@ import type { Module, ModuleSource } from './module-source';
 /**
  * StaticModuleSource — hard-coded module list for Phase 1 MVP.
  *
- * Keys match the `isAble` permission strings used by the dashboard template's
- * navigation config. This is the contract between the onboarding tool and the
- * template's seed.ts: each key here should correspond to a row in the
- * template's ModuleEnablement table, and the template's navigation shows or
- * hides items by checking `isAble` against the enabled module keys.
+ * Keys match the module keys in the dashboard template's
+ * `lib/client-config.ts` ENABLED_MODULES set. The template's Sidebar filters
+ * nav items by `isModuleEnabled(moduleKey)`, and `apply-config.ts` rewrites
+ * that set from the `modules` array in seed-data.json.
  *
- * NOTE: "Dashboard" (isAble: '*') is always enabled in the template and is
- * NOT listed here — it is not user-selectable.
+ * NOTE: "dashboard" is always enabled in the template and is NOT listed here —
+ * it is not user-selectable.
  *
  * When a new module is added to the template, add it here AND to the
  * /provision-client skill's "Available modules" section.
  */
 const STATIC_MODULES: Module[] = [
   {
-    key: 'users-list-view',
-    displayName: 'Users List',
-    description: 'View, add, edit, and delete user accounts.',
+    key: 'users',
+    displayName: 'Users',
+    description: 'View, add, edit, and deactivate user accounts.',
   },
   {
-    key: 'role-management-view',
+    key: 'roles',
     displayName: 'Roles & Permissions',
     description: 'Manage user roles and module-level permissions.',
   },
   {
-    key: 'setting-management-view',
-    displayName: 'Settings',
-    description: 'Account and dashboard settings.',
-  },
-  {
-    key: 'logs-management-view',
-    displayName: 'Activity Logs',
-    description: 'View audit logs for user and system actions.',
-  },
-  {
-    key: 'email-management-view',
+    key: 'email-templates',
     displayName: 'Email Templates',
-    description: 'Manage transactional email templates (currently optional).',
+    description: 'Manage and send transactional email templates.',
   },
   {
-    key: 'helps-management-view',
-    displayName: 'Help Center',
-    description: 'In-app help articles and documentation (currently optional).',
+    key: 'activity-logs',
+    displayName: 'Activity Logs',
+    description: 'Audit trail of user actions across the dashboard.',
+  },
+  {
+    key: 'api-logs',
+    displayName: 'API Logs',
+    description: 'Request/response log for outbound API calls.',
+  },
+  {
+    key: 'settings',
+    displayName: 'System Settings',
+    description: 'Dashboard-wide configuration and preferences.',
   },
 ];
 

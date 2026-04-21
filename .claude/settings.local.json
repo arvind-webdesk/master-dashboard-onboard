@@ -55,7 +55,9 @@
       "Bash(grep -nA30 \"stepCreateClientRow\" src/services/ProvisioningService.ts)",
       "Bash(grep -E \"error TS|\\\\\\\\.ts\\\\\\\\\\(|exit=\")",
       "Bash(grep -E \"error TS|\\\\\\\\.ts\\\\\\\\\\(\")",
-      "Bash(grep -nB2 -A8 \"workDirFor\\\\|workDirBase\\\\|'tmp'\\\\|TMP_DIR\" src/services/TemplateCloner.ts)"
+      "Bash(grep -nB2 -A8 \"workDirFor\\\\|workDirBase\\\\|'tmp'\\\\|TMP_DIR\" src/services/TemplateCloner.ts)",
+      "Bash(npx eslint *)",
+      "Bash(pnpm lint *)"
     ]
   }
 }

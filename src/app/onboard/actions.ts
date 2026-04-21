@@ -22,6 +22,25 @@ import { normalizeSlug, isValidSlug } from '@/lib/slug';
 
 const emptyToUndef = (v: unknown) => (v === '' ? undefined : v);
 
+/**
+ * Strip integrations data when the client isn't picking a middleware dashboard.
+ * Prevents stale form state (e.g. user toggled Shopify on while exploring, then
+ * switched to Custom) from tripping integrations validation on an unrelated step.
+ */
+function stripIntegrationsIfNotMiddleware<T extends { dashboardType?: unknown; integrations?: unknown }>(
+  input: T,
+): T {
+  if (input.dashboardType === 'middleware') return input;
+  const emptySync = { products: false, orders: false, customers: false };
+  return {
+    ...input,
+    integrations: {
+      shopify: { enabled: false, sync: emptySync },
+      bigcommerce: { enabled: false, sync: emptySync },
+    },
+  } as T;
+}
+
 const optionalString = z.preprocess(emptyToUndef, z.string().optional());
 const optionalUrl = z.preprocess(
   emptyToUndef,
@@ -77,6 +96,86 @@ const onboardFormSchema = z.object({
   brandSecondaryColor: optionalHexColor,
   brandLogoUrl: optionalUrl,
   brandFaviconUrl: optionalUrl,
+  /** Sidebar palette preset — must match template's SidebarTheme union. */
+  sidebarTheme: z.enum(['navy', 'zoho', 'slate', 'neutral']).default('navy'),
+
+  dashboardType: z.enum(['custom', 'middleware', 'saas']),
+  integrations: z
+    .object({
+      shopify: z.object({
+        enabled: z.boolean(),
+        storeUrl: z.preprocess(
+          emptyToUndef,
+          z
+            .string()
+            .regex(
+              /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i,
+              'Enter the .myshopify.com domain (e.g. acme.myshopify.com).',
+            )
+            .optional(),
+        ),
+        accessToken: z.preprocess(
+          emptyToUndef,
+          z.string().min(10, 'Access token looks too short.').optional(),
+        ),
+        webhookSecret: z.preprocess(emptyToUndef, z.string().optional()),
+        sync: z.object({
+          products: z.boolean(),
+          orders: z.boolean(),
+          customers: z.boolean(),
+        }),
+      }),
+      bigcommerce: z.object({
+        enabled: z.boolean(),
+        storeHash: z.preprocess(
+          emptyToUndef,
+          z
+            .string()
+            .regex(/^[a-z0-9]{6,16}$/i, 'Store hash is the short alphanumeric string from your store URL.')
+            .optional(),
+        ),
+        accessToken: z.preprocess(
+          emptyToUndef,
+          z.string().min(10, 'Access token looks too short.').optional(),
+        ),
+        clientId: z.preprocess(emptyToUndef, z.string().optional()),
+        sync: z.object({
+          products: z.boolean(),
+          orders: z.boolean(),
+          customers: z.boolean(),
+        }),
+      }),
+    })
+    .superRefine((val, ctx) => {
+      if (val.shopify.enabled) {
+        if (!val.shopify.storeUrl)
+          ctx.addIssue({
+            code: 'custom',
+            path: ['shopify', 'storeUrl'],
+            message: 'Shopify store URL is required.',
+          });
+        if (!val.shopify.accessToken)
+          ctx.addIssue({
+            code: 'custom',
+            path: ['shopify', 'accessToken'],
+            message: 'Shopify Admin API access token is required.',
+          });
+      }
+      if (val.bigcommerce.enabled) {
+        if (!val.bigcommerce.storeHash)
+          ctx.addIssue({
+            code: 'custom',
+            path: ['bigcommerce', 'storeHash'],
+            message: 'BigCommerce store hash is required.',
+          });
+        if (!val.bigcommerce.accessToken)
+          ctx.addIssue({
+            code: 'custom',
+            path: ['bigcommerce', 'accessToken'],
+            message: 'BigCommerce API access token is required.',
+          });
+      }
+    }),
 
   enabledModules: z.array(z.string().min(1)).min(1, 'Please select at least one module.'),
   planTier: z.enum(['starter', 'pro', 'enterprise']),
@@ -90,6 +189,23 @@ const onboardFormSchema = z.object({
     emptyToUndef,
     z.string().max(1000, 'Notes are too long (max 1000 characters).').optional(),
   ),
+}).superRefine((val, ctx) => {
+  if (val.dashboardType === 'saas') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['dashboardType'],
+      message: 'The SaaS dashboard is coming soon. Pick Custom or Middleware for now.',
+    });
+  }
+  if (val.dashboardType === 'middleware') {
+    if (!val.integrations.shopify.enabled && !val.integrations.bigcommerce.enabled) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['integrations'],
+        message: 'Middleware dashboards need at least one platform enabled.',
+      });
+    }
+  }
 });
 
 export type StartProvisioningInput = z.infer<typeof onboardFormSchema>;
@@ -101,6 +217,18 @@ export interface StartProvisioningResult {
   friendlyError?: string;
 }
 
+/**
+ * Echo of integration secrets collected by the form. Returned from the server
+ * action ONLY on the success path so the ResultCard can present them as a
+ * one-time handoff for the client's own `.env`. These values never touch
+ * Prisma, never land in seed-data.json, never enter git. They live in RAM
+ * (staff browser + this action's response) and are discarded after display.
+ */
+export interface IntegrationHandoff {
+  shopify?: { storeUrl: string; accessToken: string; webhookSecret?: string };
+  bigcommerce?: { storeHash: string; accessToken: string; clientId?: string };
+}
+
 export interface ApplyAndPreviewActionResult {
   ok: boolean;
   sessionId?: string;
@@ -108,6 +236,7 @@ export interface ApplyAndPreviewActionResult {
   previewUrl?: string;
   adminEmail?: string;
   expiresAt?: string;
+  integrationHandoff?: IntegrationHandoff;
   fieldErrors?: Record<string, string>;
   friendlyError?: string;
 }
@@ -136,10 +265,10 @@ export async function startApplyAndPreview(
     return { ok: false, friendlyError: 'Your session has expired. Please sign in again.' };
   }
 
-  const normalized: StartProvisioningInput = {
+  const normalized: StartProvisioningInput = stripIntegrationsIfNotMiddleware({
     ...input,
     slug: isValidSlug(input.slug) ? input.slug : normalizeSlug(input.slug),
-  };
+  });
 
   const parsed = onboardFormSchema.safeParse(normalized);
   if (!parsed.success) {
@@ -168,6 +297,20 @@ export async function startApplyAndPreview(
       brandSecondaryColor: parsed.data.brandSecondaryColor ?? null,
       brandLogoUrl: parsed.data.brandLogoUrl ?? null,
       brandFaviconUrl: parsed.data.brandFaviconUrl ?? null,
+      sidebarTheme: parsed.data.sidebarTheme,
+      dashboardType: parsed.data.dashboardType,
+      integrations: {
+        shopify: {
+          enabled: parsed.data.integrations.shopify.enabled,
+          storeUrl: parsed.data.integrations.shopify.storeUrl ?? null,
+          sync: parsed.data.integrations.shopify.sync,
+        },
+        bigcommerce: {
+          enabled: parsed.data.integrations.bigcommerce.enabled,
+          storeHash: parsed.data.integrations.bigcommerce.storeHash ?? null,
+          sync: parsed.data.integrations.bigcommerce.sync,
+        },
+      },
       enabledModules: parsed.data.enabledModules,
       planTier: parsed.data.planTier,
       userSeats: parsed.data.userSeats,
@@ -175,6 +318,25 @@ export async function startApplyAndPreview(
       notes: parsed.data.notes ?? null,
       provisionedBy: login,
     });
+    const handoff: IntegrationHandoff = {};
+    if (parsed.data.dashboardType === 'middleware') {
+      const s = parsed.data.integrations.shopify;
+      if (s.enabled && s.storeUrl && s.accessToken) {
+        handoff.shopify = {
+          storeUrl: s.storeUrl,
+          accessToken: s.accessToken,
+          ...(s.webhookSecret ? { webhookSecret: s.webhookSecret } : {}),
+        };
+      }
+      const b = parsed.data.integrations.bigcommerce;
+      if (b.enabled && b.storeHash && b.accessToken) {
+        handoff.bigcommerce = {
+          storeHash: b.storeHash,
+          accessToken: b.accessToken,
+          ...(b.clientId ? { clientId: b.clientId } : {}),
+        };
+      }
+    }
     return {
       ok: true,
       sessionId: result.sessionId,
@@ -182,6 +344,7 @@ export async function startApplyAndPreview(
       previewUrl: result.previewUrl,
       adminEmail: result.adminEmail,
       expiresAt: result.expiresAt,
+      ...(handoff.shopify || handoff.bigcommerce ? { integrationHandoff: handoff } : {}),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -275,10 +438,10 @@ export async function startProvisioning(
     return { ok: false, friendlyError: 'Your session has expired. Please sign in again.' };
   }
 
-  const normalized: StartProvisioningInput = {
+  const normalized: StartProvisioningInput = stripIntegrationsIfNotMiddleware({
     ...input,
     slug: isValidSlug(input.slug) ? input.slug : normalizeSlug(input.slug),
-  };
+  });
 
   const parsed = onboardFormSchema.safeParse(normalized);
   if (!parsed.success) {
@@ -307,6 +470,20 @@ export async function startProvisioning(
       brandSecondaryColor: parsed.data.brandSecondaryColor ?? null,
       brandLogoUrl: parsed.data.brandLogoUrl ?? null,
       brandFaviconUrl: parsed.data.brandFaviconUrl ?? null,
+      sidebarTheme: parsed.data.sidebarTheme,
+      dashboardType: parsed.data.dashboardType,
+      integrations: {
+        shopify: {
+          enabled: parsed.data.integrations.shopify.enabled,
+          storeUrl: parsed.data.integrations.shopify.storeUrl ?? null,
+          sync: parsed.data.integrations.shopify.sync,
+        },
+        bigcommerce: {
+          enabled: parsed.data.integrations.bigcommerce.enabled,
+          storeHash: parsed.data.integrations.bigcommerce.storeHash ?? null,
+          sync: parsed.data.integrations.bigcommerce.sync,
+        },
+      },
       enabledModules: parsed.data.enabledModules,
       planTier: parsed.data.planTier,
       userSeats: parsed.data.userSeats,

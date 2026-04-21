@@ -92,6 +92,19 @@ async function main() {
     brandSecondaryColor: values['secondary-color'] ?? null,
     brandLogoUrl: values.logo ?? null,
     brandFaviconUrl: values.favicon ?? null,
+    dashboardType: 'custom',
+    integrations: {
+      shopify: {
+        enabled: false,
+        storeUrl: null,
+        sync: { products: false, orders: false, customers: false },
+      },
+      bigcommerce: {
+        enabled: false,
+        storeHash: null,
+        sync: { products: false, orders: false, customers: false },
+      },
+    },
     enabledModules: modules,
     planTier: plan,
     userSeats: seats,

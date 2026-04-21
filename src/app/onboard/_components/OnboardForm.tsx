@@ -8,6 +8,7 @@ import {
   startApplyAndPreview,
   type StartProvisioningInput,
   type ApplyAndPreviewActionResult,
+  type IntegrationHandoff,
 } from '../actions';
 import { ProgressPoller } from './ProgressPoller';
 import { ResultCard } from './ResultCard';
@@ -44,6 +45,30 @@ type FlowState =
   | 'failed';
 
 type PlanTier = 'starter' | 'pro' | 'enterprise';
+type DashboardType = 'custom' | 'middleware' | 'saas';
+type SidebarTheme = 'navy' | 'zoho' | 'slate' | 'neutral';
+
+/**
+ * Sidebar palette swatches shown on the Branding step.
+ * Hex values here are for the preview swatch ONLY — the actual runtime palette
+ * lives in the template (components/shell/sidebar-themes.ts). If you tweak the
+ * template colors, update these hex values to match.
+ */
+const SIDEBAR_THEME_OPTIONS: Array<{
+  key: SidebarTheme;
+  label: string;
+  tagline: string;
+  bg: string;
+  border: string;
+  accent: string;
+}> = [
+  { key: 'navy',    label: 'Navy',    tagline: 'Stripe-style deep navy',    bg: '#0B1A2E', border: '#1B2D47', accent: '#1B2D47' },
+  { key: 'zoho',    label: 'Zoho',    tagline: 'Gunmetal blue',             bg: '#1C2836', border: '#2B3B4D', accent: '#2B3B4D' },
+  { key: 'slate',   label: 'Slate',   tagline: 'Linear / Vercel slate-900', bg: '#0F172A', border: '#1E293B', accent: '#1E293B' },
+  { key: 'neutral', label: 'Neutral', tagline: 'GitHub / Notion pure black',bg: '#0A0A0A', border: '#262626', accent: '#262626' },
+];
+
+type SyncTargets = { products: boolean; orders: boolean; customers: boolean };
 
 type FormValues = {
   name: string;
@@ -59,6 +84,24 @@ type FormValues = {
   brandSecondaryColor?: string;
   brandLogoUrl?: string;
   brandFaviconUrl?: string;
+  sidebarTheme: SidebarTheme;
+  dashboardType: DashboardType;
+  integrations: {
+    shopify: {
+      enabled: boolean;
+      storeUrl?: string;
+      accessToken?: string;
+      webhookSecret?: string;
+      sync: SyncTargets;
+    };
+    bigcommerce: {
+      enabled: boolean;
+      storeHash?: string;
+      accessToken?: string;
+      clientId?: string;
+      sync: SyncTargets;
+    };
+  };
   enabledModules: Record<string, boolean>;
   planTier: PlanTier;
   userSeats: number;
@@ -69,7 +112,9 @@ type FormValues = {
 const STEP_FIELDS: FieldPath<FormValues>[][] = [
   ['name', 'slug', 'industry', 'country', 'timezone'],
   ['adminName', 'adminEmail', 'adminPhone', 'teamGithubUsernames'],
-  ['brandPrimaryColor', 'brandSecondaryColor', 'brandLogoUrl', 'brandFaviconUrl'],
+  ['brandPrimaryColor', 'brandSecondaryColor', 'brandLogoUrl', 'brandFaviconUrl', 'sidebarTheme'],
+  ['dashboardType'],
+  ['integrations'],
   ['enabledModules', 'planTier', 'userSeats', 'goLiveDate', 'notes'],
   [],
 ];
@@ -86,9 +131,20 @@ const STEPS = [
   { key: 'client', label: 'Client' },
   { key: 'contact', label: 'Contact' },
   { key: 'branding', label: 'Branding' },
+  { key: 'dashboard-type', label: 'Dashboard' },
+  { key: 'integrations', label: 'Integrations' },
   { key: 'features', label: 'Features' },
   { key: 'review', label: 'Review' },
 ];
+
+// Zero-based step indices so the code below stays readable.
+const STEP_CLIENT = 0;
+const STEP_CONTACT = 1;
+const STEP_BRANDING = 2;
+const STEP_DASHBOARD_TYPE = 3;
+const STEP_INTEGRATIONS = 4;
+const STEP_FEATURES = 5;
+const STEP_REVIEW = 6;
 
 const INDUSTRIES = [
   'Retail & E-commerce',
@@ -150,6 +206,10 @@ export function OnboardForm({ modules }: Props) {
     expiresAt: string;
   } | null>(null);
 
+  // One-time integration handoff returned by the server action for
+  // middleware dashboards. Lives in memory only; cleared on Start Fresh.
+  const [integrationHandoff, setIntegrationHandoff] = useState<IntegrationHandoff | null>(null);
+
   // Terminal state for done/failed.
   const [terminal, setTerminal] = useState<null | {
     status: 'READY' | 'FAILED';
@@ -157,6 +217,7 @@ export function OnboardForm({ modules }: Props) {
     friendlyError?: string;
     referenceId?: string;
     warnings?: string[];
+    integrationHandoff?: IntegrationHandoff;
   }>(null);
 
   const [friendlyError, setFriendlyError] = useState<string | null>(null);
@@ -179,6 +240,24 @@ export function OnboardForm({ modules }: Props) {
       brandSecondaryColor: '',
       brandLogoUrl: '',
       brandFaviconUrl: '',
+      sidebarTheme: 'navy',
+      dashboardType: 'custom',
+      integrations: {
+        shopify: {
+          enabled: false,
+          storeUrl: '',
+          accessToken: '',
+          webhookSecret: '',
+          sync: { products: true, orders: true, customers: false },
+        },
+        bigcommerce: {
+          enabled: false,
+          storeHash: '',
+          accessToken: '',
+          clientId: '',
+          sync: { products: true, orders: true, customers: false },
+        },
+      },
       enabledModules: Object.fromEntries(modules.map((m) => [m.key, false])),
       planTier: 'starter',
       userSeats: 5,
@@ -208,18 +287,65 @@ export function OnboardForm({ modules }: Props) {
   async function goNext() {
     const ok = await trigger(STEP_FIELDS[currentStep]);
     if (!ok) return;
-    if (currentStep === 3) {
+    if (currentStep === STEP_DASHBOARD_TYPE) {
+      const dt = watch('dashboardType');
+      if (dt === 'saas') {
+        setError('dashboardType', {
+          message: 'SaaS dashboards are coming soon. Pick Custom or Middleware.',
+        });
+        return;
+      }
+    }
+    if (currentStep === STEP_INTEGRATIONS) {
+      const { shopify, bigcommerce } = watch('integrations');
+      if (!shopify.enabled && !bigcommerce.enabled) {
+        setError('integrations', {
+          message: 'Enable at least one platform (Shopify or BigCommerce).',
+        });
+        return;
+      }
+      if (shopify.enabled) {
+        if (!shopify.storeUrl) {
+          setError('integrations.shopify.storeUrl', { message: 'Required.' });
+          return;
+        }
+        if (!shopify.accessToken) {
+          setError('integrations.shopify.accessToken', { message: 'Required.' });
+          return;
+        }
+      }
+      if (bigcommerce.enabled) {
+        if (!bigcommerce.storeHash) {
+          setError('integrations.bigcommerce.storeHash', { message: 'Required.' });
+          return;
+        }
+        if (!bigcommerce.accessToken) {
+          setError('integrations.bigcommerce.accessToken', { message: 'Required.' });
+          return;
+        }
+      }
+    }
+    if (currentStep === STEP_FEATURES) {
       const selected = Object.values(watch('enabledModules')).filter(Boolean);
       if (selected.length === 0) {
         setError('enabledModules', { message: 'Please select at least one module.' });
         return;
       }
     }
-    setCurrentStep((s) => Math.min(s + 1, STEPS.length - 1));
+    // Skip Integrations step entirely when dashboardType !== 'middleware'.
+    let next = currentStep + 1;
+    if (next === STEP_INTEGRATIONS && watch('dashboardType') !== 'middleware') {
+      next = STEP_FEATURES;
+    }
+    setCurrentStep(Math.min(next, STEPS.length - 1));
   }
 
   function goBack() {
-    setCurrentStep((s) => Math.max(s - 1, 0));
+    let prev = currentStep - 1;
+    if (prev === STEP_INTEGRATIONS && watch('dashboardType') !== 'middleware') {
+      prev = STEP_DASHBOARD_TYPE;
+    }
+    setCurrentStep(Math.max(prev, 0));
   }
 
   function buildInput(data: FormValues): StartProvisioningInput {
@@ -238,6 +364,24 @@ export function OnboardForm({ modules }: Props) {
       brandSecondaryColor: data.brandSecondaryColor || undefined,
       brandLogoUrl: data.brandLogoUrl || undefined,
       brandFaviconUrl: data.brandFaviconUrl || undefined,
+      sidebarTheme: data.sidebarTheme,
+      dashboardType: data.dashboardType,
+      integrations: {
+        shopify: {
+          enabled: data.integrations.shopify.enabled,
+          storeUrl: data.integrations.shopify.storeUrl || undefined,
+          accessToken: data.integrations.shopify.accessToken || undefined,
+          webhookSecret: data.integrations.shopify.webhookSecret || undefined,
+          sync: data.integrations.shopify.sync,
+        },
+        bigcommerce: {
+          enabled: data.integrations.bigcommerce.enabled,
+          storeHash: data.integrations.bigcommerce.storeHash || undefined,
+          accessToken: data.integrations.bigcommerce.accessToken || undefined,
+          clientId: data.integrations.bigcommerce.clientId || undefined,
+          sync: data.integrations.bigcommerce.sync,
+        },
+      },
       enabledModules: Object.entries(data.enabledModules)
         .filter(([, v]) => v)
         .map(([k]) => k),
@@ -280,6 +424,7 @@ export function OnboardForm({ modules }: Props) {
         return;
       }
       if (result.provisioningId) setProvisioningId(result.provisioningId);
+      if (result.integrationHandoff) setIntegrationHandoff(result.integrationHandoff);
       if (result.sessionId && result.previewUrl && result.adminEmail && result.expiresAt) {
         setPreviewSession({
           sessionId: result.sessionId,
@@ -309,6 +454,7 @@ export function OnboardForm({ modules }: Props) {
           setFriendlyError(null);
           setProvisioningId(null);
           setPreviewSession(null);
+          setIntegrationHandoff(null);
           setSlugEdited(false);
           form.reset();
           setCurrentStep(0);
@@ -371,9 +517,15 @@ export function OnboardForm({ modules }: Props) {
         clientName={clientName}
         disabledModules={disabledModules}
         onApproved={(repoUrl, warnings) => {
-          setTerminal({ status: 'READY', repoUrl, warnings });
+          setTerminal({
+            status: 'READY',
+            repoUrl,
+            warnings,
+            ...(integrationHandoff ? { integrationHandoff } : {}),
+          });
           setFlowState('done');
           setPreviewSession(null);
+          setIntegrationHandoff(null);
         }}
         onCancelled={() => {
           setPreviewSession(null);
@@ -618,12 +770,203 @@ export function OnboardForm({ modules }: Props) {
                 placeholder="https://cdn.acme.com/favicon.ico"
               />
             </Field>
+
+            <Field
+              label="Sidebar theme"
+              required
+              hint="Dark palette applied only to the sidebar. The rest of the app stays light."
+              error={errors.sidebarTheme?.message}
+            >
+              <Controller
+                name="sidebarTheme"
+                control={control}
+                render={({ field }) => (
+                  <div className="grid gap-3 grid-cols-2 sm:grid-cols-4">
+                    {SIDEBAR_THEME_OPTIONS.map((opt) => (
+                      <SidebarThemeCard
+                        key={opt.key}
+                        option={opt}
+                        selected={field.value === opt.key}
+                        onSelect={() => field.onChange(opt.key)}
+                      />
+                    ))}
+                  </div>
+                )}
+              />
+            </Field>
           </StepShell>
         ) : null}
 
-        {currentStep === 3 ? (
+        {currentStep === STEP_DASHBOARD_TYPE ? (
           <StepShell
-            stepIndex={3}
+            stepIndex={STEP_DASHBOARD_TYPE}
+            stepTotal={STEPS.length}
+            title="What kind of dashboard is this?"
+            subtitle="Pick how this client's dashboard will be set up."
+          >
+            <Controller
+              name="dashboardType"
+              control={control}
+              render={({ field }) => (
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <DashboardTypeCard
+                    value="custom"
+                    selected={field.value === 'custom'}
+                    onSelect={() => field.onChange('custom')}
+                    title="Custom"
+                    description="Standalone dashboard with users, roles, logs, and settings. No external commerce integration."
+                  />
+                  <DashboardTypeCard
+                    value="middleware"
+                    selected={field.value === 'middleware'}
+                    onSelect={() => field.onChange('middleware')}
+                    title="Middleware"
+                    description="Connects to Shopify and/or BigCommerce. Syncs products, orders, and customers."
+                    badge="Shopify · BigCommerce"
+                  />
+                  <DashboardTypeCard
+                    value="saas"
+                    selected={field.value === 'saas'}
+                    onSelect={() => {}}
+                    disabled
+                    title="SaaS"
+                    description="Multi-tenant hosted dashboard we run centrally. Not yet available."
+                    badge="Coming soon"
+                  />
+                </div>
+              )}
+            />
+            {errors.dashboardType?.message ? (
+              <p className="mt-2 text-sm text-red-700">{errors.dashboardType.message}</p>
+            ) : null}
+          </StepShell>
+        ) : null}
+
+        {currentStep === STEP_INTEGRATIONS ? (
+          <StepShell
+            stepIndex={STEP_INTEGRATIONS}
+            stepTotal={STEPS.length}
+            title="Connect the commerce platforms"
+            subtitle="Enter the credentials for each platform the client uses. These are shown once at the end so you can hand them to the client — they are never committed to the repository."
+          >
+            <PlatformPanel
+              platform="shopify"
+              title="Shopify"
+              description="Enable if this client runs a Shopify store."
+              enabled={!!watch('integrations.shopify.enabled')}
+              onToggle={(v) =>
+                setValue('integrations.shopify.enabled', v, { shouldValidate: false })
+              }
+            >
+              <Field
+                label="Store URL"
+                required
+                hint="Your myshopify.com domain — e.g. acme.myshopify.com"
+                error={errors.integrations?.shopify?.storeUrl?.message}
+              >
+                <TextInput
+                  {...register('integrations.shopify.storeUrl')}
+                  placeholder="acme.myshopify.com"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                />
+              </Field>
+              <Field
+                label="Admin API access token"
+                required
+                hint="Custom app access token from Shopify admin (starts with shpat_). Never committed."
+                error={errors.integrations?.shopify?.accessToken?.message}
+              >
+                <TextInput
+                  type="password"
+                  {...register('integrations.shopify.accessToken')}
+                  placeholder="shpat_••••••••"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                />
+              </Field>
+              <Field
+                label="Webhook signing secret"
+                hint="Optional — only if the client uses webhooks."
+                error={errors.integrations?.shopify?.webhookSecret?.message}
+              >
+                <TextInput
+                  type="password"
+                  {...register('integrations.shopify.webhookSecret')}
+                  autoComplete="off"
+                />
+              </Field>
+              <SyncToggles namePrefix="integrations.shopify.sync" register={register} watch={watch} />
+            </PlatformPanel>
+
+            <PlatformPanel
+              platform="bigcommerce"
+              title="BigCommerce"
+              description="Enable if this client runs a BigCommerce store."
+              enabled={!!watch('integrations.bigcommerce.enabled')}
+              onToggle={(v) =>
+                setValue('integrations.bigcommerce.enabled', v, { shouldValidate: false })
+              }
+            >
+              <Field
+                label="Store hash"
+                required
+                hint="Short alphanumeric ID from your BigCommerce store URL."
+                error={errors.integrations?.bigcommerce?.storeHash?.message}
+              >
+                <TextInput
+                  {...register('integrations.bigcommerce.storeHash')}
+                  placeholder="abc123def"
+                  className="font-mono"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                />
+              </Field>
+              <Field
+                label="API access token"
+                required
+                hint="Access token from a BigCommerce API account. Never committed."
+                error={errors.integrations?.bigcommerce?.accessToken?.message}
+              >
+                <TextInput
+                  type="password"
+                  {...register('integrations.bigcommerce.accessToken')}
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                />
+              </Field>
+              <Field
+                label="Client ID"
+                hint="Optional — only for OAuth apps."
+                error={errors.integrations?.bigcommerce?.clientId?.message}
+              >
+                <TextInput
+                  {...register('integrations.bigcommerce.clientId')}
+                  autoComplete="off"
+                />
+              </Field>
+              <SyncToggles
+                namePrefix="integrations.bigcommerce.sync"
+                register={register}
+                watch={watch}
+              />
+            </PlatformPanel>
+
+            {(errors.integrations as { message?: string } | undefined)?.message ? (
+              <p className="mt-2 text-sm text-red-700">
+                {(errors.integrations as { message?: string }).message}
+              </p>
+            ) : null}
+          </StepShell>
+        ) : null}
+
+        {currentStep === STEP_FEATURES ? (
+          <StepShell
+            stepIndex={STEP_FEATURES}
             stepTotal={STEPS.length}
             title="What's included?"
             subtitle="Pick the modules and plan for this client."
@@ -672,9 +1015,9 @@ export function OnboardForm({ modules }: Props) {
           </StepShell>
         ) : null}
 
-        {currentStep === 4 ? (
+        {currentStep === STEP_REVIEW ? (
           <StepShell
-            stepIndex={4}
+            stepIndex={STEP_REVIEW}
             stepTotal={STEPS.length}
             title="Does this look right?"
             subtitle="Review the details, then click Apply & preview to see the dashboard before creating the repo."
@@ -776,6 +1119,42 @@ function ReviewSummary({ values, modules }: { values: FormValues; modules: Modul
     ],
     ['Logo', values.brandLogoUrl || '—'],
     ['Favicon', values.brandFaviconUrl || '—'],
+    [
+      'Sidebar theme',
+      (() => {
+        const opt = SIDEBAR_THEME_OPTIONS.find((o) => o.key === values.sidebarTheme);
+        if (!opt) return values.sidebarTheme;
+        return (
+          <span key="sidebar-theme" className="flex items-center gap-2">
+            <span
+              className="inline-block h-4 w-4 rounded border border-surface-border"
+              style={{ backgroundColor: opt.bg }}
+            />
+            <span>{opt.label}</span>
+            <span className="text-xs text-gray-500">· {opt.tagline}</span>
+          </span>
+        );
+      })(),
+    ],
+    [
+      'Dashboard type',
+      (() => {
+        if (values.dashboardType === 'custom') return 'Custom';
+        if (values.dashboardType === 'saas') return 'SaaS (coming soon)';
+        const parts: string[] = [];
+        const s = values.integrations.shopify;
+        const b = values.integrations.bigcommerce;
+        if (s.enabled) {
+          const syncs = Object.entries(s.sync).filter(([, v]) => v).map(([k]) => k);
+          parts.push(`Shopify (${s.storeUrl || '—'}${syncs.length ? ` · ${syncs.join('/')}` : ''})`);
+        }
+        if (b.enabled) {
+          const syncs = Object.entries(b.sync).filter(([, v]) => v).map(([k]) => k);
+          parts.push(`BigCommerce (${b.storeHash || '—'}${syncs.length ? ` · ${syncs.join('/')}` : ''})`);
+        }
+        return `Middleware · ${parts.length ? parts.join(' · ') : 'no platforms selected'}`;
+      })(),
+    ],
     ['Plan', `${values.planTier} · ${values.userSeats} seats`],
     ['Go-live', values.goLiveDate || '—'],
     [
@@ -841,5 +1220,188 @@ function ConfirmModal({
         </div>
       </div>
     </div>
+  );
+}
+
+function DashboardTypeCard({
+  title,
+  description,
+  selected,
+  onSelect,
+  badge,
+  disabled,
+}: {
+  value: DashboardType;
+  title: string;
+  description: string;
+  selected: boolean;
+  onSelect: () => void;
+  badge?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={disabled ? undefined : onSelect}
+      aria-pressed={selected}
+      aria-disabled={disabled}
+      disabled={disabled}
+      className={
+        'flex flex-col items-start gap-2 rounded-xl border p-4 text-left transition ' +
+        (disabled
+          ? 'cursor-not-allowed border-surface-border bg-surface-muted/50 opacity-60'
+          : selected
+            ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-200'
+            : 'border-surface-border bg-white hover:border-blue-300 hover:bg-blue-50/40')
+      }
+    >
+      <div className="flex w-full items-center justify-between">
+        <span className="text-sm font-semibold text-gray-900">{title}</span>
+        {badge ? (
+          <span
+            className={
+              'rounded-full px-2 py-0.5 text-[10px] font-medium ' +
+              (disabled
+                ? 'bg-gray-200 text-gray-600'
+                : 'bg-blue-100 text-blue-800')
+            }
+          >
+            {badge}
+          </span>
+        ) : null}
+      </div>
+      <p className="text-xs leading-relaxed text-gray-600">{description}</p>
+    </button>
+  );
+}
+
+function SidebarThemeCard({
+  option,
+  selected,
+  onSelect,
+}: {
+  option: (typeof SIDEBAR_THEME_OPTIONS)[number];
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      className={
+        'group flex flex-col items-stretch gap-2 rounded-xl border p-2 text-left transition ' +
+        (selected
+          ? 'border-blue-500 ring-2 ring-blue-200'
+          : 'border-surface-border hover:border-blue-300')
+      }
+    >
+      {/* Mini sidebar mock — solid bg with two thin border stripes as "rows". */}
+      <div
+        className="h-20 w-full rounded-md relative overflow-hidden"
+        style={{ backgroundColor: option.bg }}
+      >
+        <div
+          className="absolute left-2 right-2 top-3 h-2 rounded-sm"
+          style={{ backgroundColor: option.accent, opacity: 0.9 }}
+        />
+        <div
+          className="absolute left-2 right-4 top-7 h-1.5 rounded-sm"
+          style={{ backgroundColor: option.border }}
+        />
+        <div
+          className="absolute left-2 right-6 top-10 h-1.5 rounded-sm"
+          style={{ backgroundColor: option.border }}
+        />
+        <div
+          className="absolute left-2 right-5 top-13 h-1.5 rounded-sm"
+          style={{ backgroundColor: option.border, top: '3.25rem' }}
+        />
+      </div>
+      <div className="px-0.5">
+        <div className="text-xs font-semibold text-gray-900">{option.label}</div>
+        <div className="text-[10px] leading-tight text-gray-500">{option.tagline}</div>
+      </div>
+    </button>
+  );
+}
+
+function PlatformPanel({
+  title,
+  description,
+  enabled,
+  onToggle,
+  children,
+}: {
+  platform: 'shopify' | 'bigcommerce';
+  title: string;
+  description: string;
+  enabled: boolean;
+  onToggle: (v: boolean) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-surface-border bg-white">
+      <label className="flex cursor-pointer items-start gap-3 p-4">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => onToggle(e.target.checked)}
+          className="mt-0.5 h-4 w-4"
+        />
+        <div className="flex-1">
+          <div className="text-sm font-semibold text-gray-900">{title}</div>
+          <div className="text-xs text-gray-500">{description}</div>
+        </div>
+      </label>
+      {enabled ? (
+        <div className="space-y-4 border-t border-surface-border p-4">{children}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function SyncToggles({
+  namePrefix,
+  register,
+  watch,
+}: {
+  namePrefix: `integrations.${'shopify' | 'bigcommerce'}.sync`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  register: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  watch: any;
+}) {
+  const targets: Array<{ key: keyof SyncTargets; label: string }> = [
+    { key: 'products', label: 'Products' },
+    { key: 'orders', label: 'Orders' },
+    { key: 'customers', label: 'Customers' },
+  ];
+  return (
+    <Field label="Initial sync" hint="Which collections to pull from the store on first run.">
+      <div className="flex flex-wrap gap-2">
+        {targets.map((t) => {
+          const checked = !!watch(`${namePrefix}.${t.key}`);
+          return (
+            <label
+              key={t.key}
+              className={
+                'flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-sm ' +
+                (checked
+                  ? 'border-blue-500 bg-blue-50 text-blue-900'
+                  : 'border-surface-border bg-white text-gray-700 hover:bg-surface-muted')
+              }
+            >
+              <input
+                type="checkbox"
+                {...register(`${namePrefix}.${t.key}`)}
+                className="h-4 w-4"
+              />
+              {t.label}
+            </label>
+          );
+        })}
+      </div>
+    </Field>
   );
 }

@@ -96,6 +96,8 @@ export interface SeedData {
     secondaryColor: string | null;
     logoUrl: string | null;
     faviconUrl: string | null;
+    /** Sidebar palette preset — matches template's SidebarTheme union. */
+    sidebarTheme: 'navy' | 'zoho' | 'slate' | 'neutral';
   };
   plan: {
     tier: 'starter' | 'pro' | 'enterprise';
@@ -103,6 +105,33 @@ export interface SeedData {
     goLiveDate: string | null; // YYYY-MM-DD
   };
   modules: Array<{ key: string; enabled: true }>;
+  /**
+   * Dashboard flavour picked by staff.
+   * - `custom`     — standalone dashboard, no external commerce platform.
+   * - `middleware` — Shopify / BigCommerce connector; see `integrations`.
+   * - `saas`       — reserved, not yet offered; form blocks selection.
+   */
+  dashboardType: 'custom' | 'middleware' | 'saas';
+  /**
+   * Only set when `dashboardType === 'middleware'`. Describes WHICH platforms
+   * the client enabled and WHICH collections to sync.
+   *
+   * SECURITY: never include secrets here (access tokens, webhook secrets).
+   * Those are shown once to staff at the end of the flow and handed to the
+   * client for their own `.env` — they never land in the committed repo.
+   */
+  integrations: {
+    shopify: {
+      enabled: boolean;
+      storeUrl: string | null;
+      sync: { products: boolean; orders: boolean; customers: boolean };
+    };
+    bigcommerce: {
+      enabled: boolean;
+      storeHash: string | null;
+      sync: { products: boolean; orders: boolean; customers: boolean };
+    };
+  };
   notes: string | null;
   provisionedAt: string; // ISO 8601
   provisionedBy: string; // GitHub login
@@ -137,6 +166,13 @@ export class TemplateCloner {
 
   /** Best-effort cleanup. Non-fatal on Windows lock flakes. */
   async cleanup(shortId: string): Promise<void> {
+    // Dev escape hatch: set KEEP_PREVIEW_TMP=1 to keep the cloned template
+    // dir around after approve/cancel/timeout so you can inspect what
+    // apply:config produced (lib/client-config.ts, prisma/seed-data.json, …).
+    if (process.env.KEEP_PREVIEW_TMP === '1') {
+      console.log(`[cleanup] KEEP_PREVIEW_TMP=1 set — preserving ${this.workDirFor(shortId)}`);
+      return;
+    }
     const dir = this.workDirFor(shortId);
     try {
       await fs.rm(dir, { recursive: true, force: true, maxRetries: 3 });

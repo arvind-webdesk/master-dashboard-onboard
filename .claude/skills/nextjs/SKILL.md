@@ -30,17 +30,17 @@ Ask for (via AskUserQuestion if any are missing):
 5. **Logo URL** (optional)
 6. **Notes** (optional, stored in the `clients` row)
 
-### Available modules (keys match the template's `isAble` strings)
+### Available modules (keys match the template's sidebar `moduleKey` gates)
 
-| Key                        | Name                  | Always-on? |
-|----------------------------|-----------------------|------------|
-| *(implicit `*`)*           | Dashboard             | Yes — not selectable |
-| `users-list-view`          | Users List            | Optional |
-| `role-management-view`     | Roles & Permissions   | Optional |
-| `setting-management-view`  | Settings              | Optional |
-| `logs-management-view`     | Activity Logs         | Optional |
-| `email-management-view`    | Email Templates       | Optional (currently off-by-default in the template) |
-| `helps-management-view`    | Help Center           | Optional (currently off-by-default in the template) |
+| Key               | Name                | Always-on? |
+|-------------------|---------------------|------------|
+| `dashboard`       | Dashboard           | Yes — not selectable; always emitted into `ENABLED_MODULES` by the template |
+| `users`           | Users               | Optional |
+| `roles`           | Roles & Permissions | Optional |
+| `email-templates` | Email Templates     | Optional |
+| `activity-logs`   | Activity Logs       | Optional |
+| `api-logs`        | API Logs            | Optional |
+| `settings`        | System Settings     | Optional |
 
 If a user asks for a module not in this list, refuse and tell them to add it to `src/lib/modules.ts` and the template's navigation config first.
 

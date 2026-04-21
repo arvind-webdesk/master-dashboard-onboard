@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { prisma } from '@/lib/prisma';
 import { scrubAndTruncate } from '@/lib/scrub';
 import { assertValidSlug, repoNameFromSlug } from '@/lib/slug';
-import { assertKnownModules } from '@/lib/modules';
+import { assertKnownModules, defaultModuleSource } from '@/lib/modules';
 import { runPreflight } from '@/lib/preflight';
 import { GitHubClient, createGitHubClient } from './GitHubClient';
 import { TemplateCloner, type SeedData } from './TemplateCloner';
@@ -62,8 +62,31 @@ export interface ProvisionInput {
   brandSecondaryColor?: string | null;
   brandLogoUrl?: string | null;
   brandFaviconUrl?: string | null;
+  /** Sidebar palette preset. Defaults to 'navy'. */
+  sidebarTheme: 'navy' | 'zoho' | 'slate' | 'neutral';
 
-  // Step 4 — Features
+  // Step 4 — Dashboard type
+  dashboardType: 'custom' | 'middleware' | 'saas';
+  /**
+   * Only honoured when dashboardType === 'middleware'. Secrets (access token,
+   * webhook secret) are intentionally absent from this struct — the form
+   * collects them, the service returns them in the action result for a
+   * one-time handoff, and they are never persisted or committed.
+   */
+  integrations: {
+    shopify: {
+      enabled: boolean;
+      storeUrl: string | null;
+      sync: { products: boolean; orders: boolean; customers: boolean };
+    };
+    bigcommerce: {
+      enabled: boolean;
+      storeHash: string | null;
+      sync: { products: boolean; orders: boolean; customers: boolean };
+    };
+  };
+
+  // Step 5 — Features
   enabledModules: string[];
   planTier: 'starter' | 'pro' | 'enterprise';
   userSeats: number;
@@ -186,6 +209,7 @@ export class ProvisioningService {
 
     const workDir = this.cloner.workDirFor(shortId);
 
+    const initialSeed = await this.buildSeed(validated);
     const session = manager.create({
       provisioningId,
       clientId,
@@ -193,7 +217,7 @@ export class ProvisioningService {
       slug: validated.slug,
       tmpDir: workDir,
       port,
-      seed: this.buildSeed(validated),
+      seed: initialSeed,
       input: validated,
     });
 
@@ -253,7 +277,7 @@ export class ProvisioningService {
         }
       });
 
-      const seed = this.buildSeed(validated);
+      const seed = await this.buildSeed(validated);
       // Keep seed on session for debugging.
       session.seed = seed;
 
@@ -727,7 +751,15 @@ export class ProvisioningService {
 
   // ─── Internal helpers ─────────────────────────────────────────────────────
 
-  private buildSeed(validated: ProvisionInput): SeedData {
+  private async buildSeed(validated: ProvisionInput): Promise<SeedData> {
+    // Emit the FULL module list with explicit enabled flags (true for selected,
+    // false otherwise). The template's apply:config needs an authoritative
+    // state — if we only sent selected keys, modules not in the list would
+    // keep the template's shipped default instead of being disabled.
+    const allModules = await defaultModuleSource.list();
+    const selected = new Set(validated.enabledModules);
+    const modules = allModules.map((m) => ({ key: m.key, enabled: selected.has(m.key) }));
+
     return {
       version: 1,
       client: {
@@ -747,13 +779,27 @@ export class ProvisioningService {
         secondaryColor: validated.brandSecondaryColor ?? null,
         logoUrl: validated.brandLogoUrl ?? null,
         faviconUrl: validated.brandFaviconUrl ?? null,
+        sidebarTheme: validated.sidebarTheme,
       },
       plan: {
         tier: validated.planTier,
         userSeats: validated.userSeats,
         goLiveDate: validated.goLiveDate ?? null,
       },
-      modules: validated.enabledModules.map((key) => ({ key, enabled: true as const })),
+      modules,
+      dashboardType: validated.dashboardType,
+      integrations: {
+        shopify: {
+          enabled: validated.integrations.shopify.enabled,
+          storeUrl: validated.integrations.shopify.storeUrl ?? null,
+          sync: validated.integrations.shopify.sync,
+        },
+        bigcommerce: {
+          enabled: validated.integrations.bigcommerce.enabled,
+          storeHash: validated.integrations.bigcommerce.storeHash ?? null,
+          sync: validated.integrations.bigcommerce.sync,
+        },
+      },
       notes: validated.notes ?? null,
       provisionedAt: new Date().toISOString(),
       provisionedBy: validated.provisionedBy,
@@ -798,6 +844,33 @@ export class ProvisioningService {
       );
     }
     await assertKnownModules(input.enabledModules);
+    if (input.dashboardType === 'saas') {
+      throw new ProvisioningError(
+        'The SaaS dashboard is coming soon and cannot be provisioned yet.',
+        'saas dashboardType not yet supported',
+      );
+    }
+    if (input.dashboardType === 'middleware') {
+      const { shopify, bigcommerce } = input.integrations;
+      if (!shopify.enabled && !bigcommerce.enabled) {
+        throw new ProvisioningError(
+          'Middleware dashboards need at least one platform (Shopify or BigCommerce) enabled.',
+          'middleware selected but no platform enabled',
+        );
+      }
+      if (shopify.enabled && !shopify.storeUrl) {
+        throw new ProvisioningError(
+          'Please enter the Shopify store URL.',
+          'shopify enabled but storeUrl missing',
+        );
+      }
+      if (bigcommerce.enabled && !bigcommerce.storeHash) {
+        throw new ProvisioningError(
+          'Please enter the BigCommerce store hash.',
+          'bigcommerce enabled but storeHash missing',
+        );
+      }
+    }
     return input;
   }
 
