@@ -41,6 +41,8 @@ Ask for (via AskUserQuestion if any are missing):
 | `activity-logs`   | Activity Logs       | Optional |
 | `api-logs`        | API Logs            | Optional |
 | `settings`        | System Settings     | Optional |
+| `import-export`   | Import/Export       | Optional |
+| `cron`            | Cron                | Optional |
 
 If a user asks for a module not in this list, refuse and tell them to add it to `src/lib/modules.ts` and the template's navigation config first.
 

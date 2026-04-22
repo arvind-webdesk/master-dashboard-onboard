@@ -45,6 +45,16 @@ const STATIC_MODULES: Module[] = [
     displayName: 'System Settings',
     description: 'Dashboard-wide configuration and preferences.',
   },
+  {
+    key: 'import-export',
+    displayName: 'Import/Export',
+    description: 'Bulk import and export data across supported modules (CSV/Excel).',
+  },
+  {
+    key: 'cron',
+    displayName: 'Cron',
+    description: 'Schedule and monitor background jobs and recurring tasks.',
+  },
 ];
 
 export class StaticModuleSource implements ModuleSource {

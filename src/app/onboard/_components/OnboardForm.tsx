@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, useTransition } from 'react';
+import { useEffect, useMemo, useState, useTransition } from 'react';
 import { useForm, Controller, type FieldPath } from 'react-hook-form';
 import type { Module } from '@/lib/module-source';
 import { normalizeSlug } from '@/lib/slug';
@@ -86,22 +86,7 @@ type FormValues = {
   brandFaviconUrl?: string;
   sidebarTheme: SidebarTheme;
   dashboardType: DashboardType;
-  integrations: {
-    shopify: {
-      enabled: boolean;
-      storeUrl?: string;
-      accessToken?: string;
-      webhookSecret?: string;
-      sync: SyncTargets;
-    };
-    bigcommerce: {
-      enabled: boolean;
-      storeHash?: string;
-      accessToken?: string;
-      clientId?: string;
-      sync: SyncTargets;
-    };
-  };
+  integrationType: 'shopify' | 'bigcommerce' | 'none';
   enabledModules: Record<string, boolean>;
   planTier: PlanTier;
   userSeats: number;
@@ -114,7 +99,7 @@ const STEP_FIELDS: FieldPath<FormValues>[][] = [
   ['adminName', 'adminEmail', 'adminPhone', 'teamGithubUsernames'],
   ['brandPrimaryColor', 'brandSecondaryColor', 'brandLogoUrl', 'brandFaviconUrl', 'sidebarTheme'],
   ['dashboardType'],
-  ['integrations'],
+  ['integrationType'],
   ['enabledModules', 'planTier', 'userSeats', 'goLiveDate', 'notes'],
   [],
 ];
@@ -193,7 +178,43 @@ interface Props {
   modules: Module[];
 }
 
+const DRAFT_STORAGE_KEY = 'onboard-form-draft-v1';
+
+type PersistedDraft = {
+  values: FormValues;
+  currentStep: number;
+  slugEdited: boolean;
+};
+
+function loadDraft(): PersistedDraft | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedDraft;
+    if (!parsed || typeof parsed !== 'object' || !parsed.values) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function clearDraft() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(DRAFT_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export function OnboardForm({ modules }: Props) {
+  // Hydration-safe draft restoration: we MUST render the same tree on the
+  // server and on the first client render, otherwise React throws a hydration
+  // mismatch. So we always start at step 0 with empty defaults, then — once
+  // mounted — read localStorage and restore the saved step + values.
+  const [hydrated, setHydrated] = useState(false);
+
   const [flowState, setFlowState] = useState<FlowState>('draft');
   const [currentStep, setCurrentStep] = useState(0);
   const [provisioningId, setProvisioningId] = useState<string | null>(null);
@@ -224,46 +245,33 @@ export function OnboardForm({ modules }: Props) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pending, startTransition] = useTransition();
 
+  const emptyDefaults: FormValues = {
+    name: '',
+    slug: '',
+    industry: '',
+    country: '',
+    timezone: 'Etc/UTC',
+    adminName: '',
+    adminEmail: '',
+    adminPhone: '',
+    teamGithubUsernames: '',
+    brandPrimaryColor: '#1e40af',
+    brandSecondaryColor: '',
+    brandLogoUrl: '',
+    brandFaviconUrl: '',
+    sidebarTheme: 'navy',
+    dashboardType: 'custom',
+    integrationType: 'none',
+    enabledModules: Object.fromEntries(modules.map((m) => [m.key, false])),
+    planTier: 'starter',
+    userSeats: 5,
+    goLiveDate: '',
+    notes: '',
+  };
+
   const form = useForm<FormValues>({
     mode: 'onBlur',
-    defaultValues: {
-      name: '',
-      slug: '',
-      industry: '',
-      country: '',
-      timezone: 'Etc/UTC',
-      adminName: '',
-      adminEmail: '',
-      adminPhone: '',
-      teamGithubUsernames: '',
-      brandPrimaryColor: '#1e40af',
-      brandSecondaryColor: '',
-      brandLogoUrl: '',
-      brandFaviconUrl: '',
-      sidebarTheme: 'navy',
-      dashboardType: 'custom',
-      integrations: {
-        shopify: {
-          enabled: false,
-          storeUrl: '',
-          accessToken: '',
-          webhookSecret: '',
-          sync: { products: true, orders: true, customers: false },
-        },
-        bigcommerce: {
-          enabled: false,
-          storeHash: '',
-          accessToken: '',
-          clientId: '',
-          sync: { products: true, orders: true, customers: false },
-        },
-      },
-      enabledModules: Object.fromEntries(modules.map((m) => [m.key, false])),
-      planTier: 'starter',
-      userSeats: 5,
-      goLiveDate: '',
-      notes: '',
-    },
+    defaultValues: emptyDefaults,
   });
 
   const {
@@ -279,6 +287,63 @@ export function OnboardForm({ modules }: Props) {
 
   const name = watch('name');
   const [slugEdited, setSlugEdited] = useState(false);
+
+  // Restore any saved draft after mount. Doing this in an effect (not during
+  // render) avoids a server/client hydration mismatch — the first render on
+  // both sides uses emptyDefaults + step 0, then the client repopulates.
+  useEffect(() => {
+    const draft = loadDraft();
+    if (draft) {
+      form.reset({
+        ...(draft.values as FormValues),
+        enabledModules: {
+          ...Object.fromEntries(modules.map((m) => [m.key, false])),
+          ...(draft.values?.enabledModules ?? {}),
+        },
+      });
+      setCurrentStep(
+        Math.min(Math.max(draft.currentStep ?? 0, 0), STEPS.length - 1),
+      );
+      setSlugEdited(Boolean(draft.slugEdited));
+    }
+    setHydrated(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist form values + current step to localStorage on every change, so a
+  // page refresh lands the user back on the step they were on with the data
+  // they had entered. Cleared on successful submit or Start Fresh. Guarded by
+  // `hydrated` so the initial empty render doesn't overwrite the saved draft
+  // before we've had a chance to read it back.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!hydrated) return;
+    const sub = form.watch((values) => {
+      try {
+        const payload: PersistedDraft = {
+          values: values as FormValues,
+          currentStep,
+          slugEdited,
+        };
+        window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(payload));
+      } catch {
+        // ignore storage errors (quota, disabled storage, etc.)
+      }
+    });
+    // Also save immediately so step/slugEdited changes persist without waiting
+    // for a form value change.
+    try {
+      const payload: PersistedDraft = {
+        values: form.getValues(),
+        currentStep,
+        slugEdited,
+      };
+      window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // ignore
+    }
+    return () => sub.unsubscribe();
+  }, [form, currentStep, slugEdited, hydrated]);
   const derivedSlug = useMemo(() => normalizeSlug(name || ''), [name]);
   if (!slugEdited && watch('slug') !== derivedSlug) {
     setValue('slug', derivedSlug, { shouldValidate: false });
@@ -297,32 +362,12 @@ export function OnboardForm({ modules }: Props) {
       }
     }
     if (currentStep === STEP_INTEGRATIONS) {
-      const { shopify, bigcommerce } = watch('integrations');
-      if (!shopify.enabled && !bigcommerce.enabled) {
-        setError('integrations', {
-          message: 'Enable at least one platform (Shopify or BigCommerce).',
+      const integrationType = watch('integrationType');
+      if (integrationType === 'none') {
+        setError('integrationType', {
+          message: 'Please select an integration type (Shopify or BigCommerce).',
         });
         return;
-      }
-      if (shopify.enabled) {
-        if (!shopify.storeUrl) {
-          setError('integrations.shopify.storeUrl', { message: 'Required.' });
-          return;
-        }
-        if (!shopify.accessToken) {
-          setError('integrations.shopify.accessToken', { message: 'Required.' });
-          return;
-        }
-      }
-      if (bigcommerce.enabled) {
-        if (!bigcommerce.storeHash) {
-          setError('integrations.bigcommerce.storeHash', { message: 'Required.' });
-          return;
-        }
-        if (!bigcommerce.accessToken) {
-          setError('integrations.bigcommerce.accessToken', { message: 'Required.' });
-          return;
-        }
       }
     }
     if (currentStep === STEP_FEATURES) {
@@ -368,18 +413,18 @@ export function OnboardForm({ modules }: Props) {
       dashboardType: data.dashboardType,
       integrations: {
         shopify: {
-          enabled: data.integrations.shopify.enabled,
-          storeUrl: data.integrations.shopify.storeUrl || undefined,
-          accessToken: data.integrations.shopify.accessToken || undefined,
-          webhookSecret: data.integrations.shopify.webhookSecret || undefined,
-          sync: data.integrations.shopify.sync,
+          enabled: data.integrationType === 'shopify',
+          storeUrl: undefined,
+          accessToken: undefined,
+          webhookSecret: undefined,
+          sync: { products: true, orders: true, customers: false },
         },
         bigcommerce: {
-          enabled: data.integrations.bigcommerce.enabled,
-          storeHash: data.integrations.bigcommerce.storeHash || undefined,
-          accessToken: data.integrations.bigcommerce.accessToken || undefined,
-          clientId: data.integrations.bigcommerce.clientId || undefined,
-          sync: data.integrations.bigcommerce.sync,
+          enabled: data.integrationType === 'bigcommerce',
+          storeHash: undefined,
+          accessToken: undefined,
+          clientId: undefined,
+          sync: { products: true, orders: true, customers: false },
         },
       },
       enabledModules: Object.entries(data.enabledModules)
@@ -415,12 +460,30 @@ export function OnboardForm({ modules }: Props) {
       const result: ApplyAndPreviewActionResult = await startApplyAndPreview(input);
       if (!result.ok) {
         setFlowState('draft');
+        const knownFormPaths = new Set<string>([
+          'name', 'slug', 'industry', 'country', 'timezone',
+          'adminName', 'adminEmail', 'adminPhone', 'teamGithubUsernames',
+          'brandPrimaryColor', 'brandSecondaryColor', 'brandLogoUrl', 'brandFaviconUrl', 'sidebarTheme',
+          'dashboardType', 'integrationType',
+          'enabledModules', 'planTier', 'userSeats', 'goLiveDate', 'notes',
+        ]);
+        const unmapped: string[] = [];
         if (result.fieldErrors) {
           for (const [key, msg] of Object.entries(result.fieldErrors)) {
-            setError(key as FieldPath<FormValues>, { message: msg });
+            if (knownFormPaths.has(key)) {
+              setError(key as FieldPath<FormValues>, { message: msg });
+            } else {
+              unmapped.push(`${key}: ${msg}`);
+            }
           }
         }
-        if (result.friendlyError) setFriendlyError(result.friendlyError);
+        if (result.friendlyError) {
+          setFriendlyError(result.friendlyError);
+        } else if (unmapped.length > 0) {
+          setFriendlyError(unmapped.join(' · '));
+        } else if (result.fieldErrors && Object.keys(result.fieldErrors).length > 0) {
+          setFriendlyError('Some fields need attention — scroll back through the steps to review.');
+        }
         return;
       }
       if (result.provisioningId) setProvisioningId(result.provisioningId);
@@ -458,6 +521,7 @@ export function OnboardForm({ modules }: Props) {
           setSlugEdited(false);
           form.reset();
           setCurrentStep(0);
+          clearDraft();
         }}
       />
     );
@@ -526,6 +590,7 @@ export function OnboardForm({ modules }: Props) {
           setFlowState('done');
           setPreviewSession(null);
           setIntegrationHandoff(null);
+          clearDraft();
         }}
         onCancelled={() => {
           setPreviewSession(null);
@@ -846,121 +911,42 @@ export function OnboardForm({ modules }: Props) {
           <StepShell
             stepIndex={STEP_INTEGRATIONS}
             stepTotal={STEPS.length}
-            title="Connect the commerce platforms"
-            subtitle="Enter the credentials for each platform the client uses. These are shown once at the end so you can hand them to the client — they are never committed to the repository."
+            title="Select integration type"
+            subtitle="Choose which commerce platform this dashboard will connect to."
           >
-            <PlatformPanel
-              platform="shopify"
-              title="Shopify"
-              description="Enable if this client runs a Shopify store."
-              enabled={!!watch('integrations.shopify.enabled')}
-              onToggle={(v) =>
-                setValue('integrations.shopify.enabled', v, { shouldValidate: false })
-              }
+            <Field
+              label="Integration type"
+              required
+              hint="Select the platform the client uses for their online store."
+              error={errors.integrationType?.message}
             >
-              <Field
-                label="Store URL"
-                required
-                hint="Your myshopify.com domain — e.g. acme.myshopify.com"
-                error={errors.integrations?.shopify?.storeUrl?.message}
-              >
-                <TextInput
-                  {...register('integrations.shopify.storeUrl')}
-                  placeholder="acme.myshopify.com"
-                  autoComplete="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                />
-              </Field>
-              <Field
-                label="Admin API access token"
-                required
-                hint="Custom app access token from Shopify admin (starts with shpat_). Never committed."
-                error={errors.integrations?.shopify?.accessToken?.message}
-              >
-                <TextInput
-                  type="password"
-                  {...register('integrations.shopify.accessToken')}
-                  placeholder="shpat_••••••••"
-                  autoComplete="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                />
-              </Field>
-              <Field
-                label="Webhook signing secret"
-                hint="Optional — only if the client uses webhooks."
-                error={errors.integrations?.shopify?.webhookSecret?.message}
-              >
-                <TextInput
-                  type="password"
-                  {...register('integrations.shopify.webhookSecret')}
-                  autoComplete="off"
-                />
-              </Field>
-              <SyncToggles namePrefix="integrations.shopify.sync" register={register} watch={watch} />
-            </PlatformPanel>
-
-            <PlatformPanel
-              platform="bigcommerce"
-              title="BigCommerce"
-              description="Enable if this client runs a BigCommerce store."
-              enabled={!!watch('integrations.bigcommerce.enabled')}
-              onToggle={(v) =>
-                setValue('integrations.bigcommerce.enabled', v, { shouldValidate: false })
-              }
-            >
-              <Field
-                label="Store hash"
-                required
-                hint="Short alphanumeric ID from your BigCommerce store URL."
-                error={errors.integrations?.bigcommerce?.storeHash?.message}
-              >
-                <TextInput
-                  {...register('integrations.bigcommerce.storeHash')}
-                  placeholder="abc123def"
-                  className="font-mono"
-                  autoComplete="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                />
-              </Field>
-              <Field
-                label="API access token"
-                required
-                hint="Access token from a BigCommerce API account. Never committed."
-                error={errors.integrations?.bigcommerce?.accessToken?.message}
-              >
-                <TextInput
-                  type="password"
-                  {...register('integrations.bigcommerce.accessToken')}
-                  autoComplete="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                />
-              </Field>
-              <Field
-                label="Client ID"
-                hint="Optional — only for OAuth apps."
-                error={errors.integrations?.bigcommerce?.clientId?.message}
-              >
-                <TextInput
-                  {...register('integrations.bigcommerce.clientId')}
-                  autoComplete="off"
-                />
-              </Field>
-              <SyncToggles
-                namePrefix="integrations.bigcommerce.sync"
-                register={register}
-                watch={watch}
-              />
-            </PlatformPanel>
-
-            {(errors.integrations as { message?: string } | undefined)?.message ? (
-              <p className="mt-2 text-sm text-red-700">
-                {(errors.integrations as { message?: string }).message}
-              </p>
-            ) : null}
+              <div className="space-y-3">
+                <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-surface-border p-4 hover:bg-surface-muted">
+                  <input
+                    type="radio"
+                    value="shopify"
+                    {...register('integrationType')}
+                    className="h-4 w-4"
+                  />
+                  <div>
+                    <div className="text-sm font-medium">Shopify</div>
+                    <div className="text-xs text-gray-500">Connect to a Shopify store</div>
+                  </div>
+                </label>
+                <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-surface-border p-4 hover:bg-surface-muted">
+                  <input
+                    type="radio"
+                    value="bigcommerce"
+                    {...register('integrationType')}
+                    className="h-4 w-4"
+                  />
+                  <div>
+                    <div className="text-sm font-medium">BigCommerce</div>
+                    <div className="text-xs text-gray-500">Connect to a BigCommerce store</div>
+                  </div>
+                </label>
+              </div>
+            </Field>
           </StepShell>
         ) : null}
 
@@ -977,7 +963,7 @@ export function OnboardForm({ modules }: Props) {
               hint="At least one is required. Dashboard is always included."
               error={errors.enabledModules?.message as string | undefined}
             >
-              <div className="space-y-2">
+              <div className="grid gap-2 sm:grid-cols-2">
                 {modules.map((m) => (
                   <label
                     key={m.key}
@@ -1141,18 +1127,13 @@ function ReviewSummary({ values, modules }: { values: FormValues; modules: Modul
       (() => {
         if (values.dashboardType === 'custom') return 'Custom';
         if (values.dashboardType === 'saas') return 'SaaS (coming soon)';
-        const parts: string[] = [];
-        const s = values.integrations.shopify;
-        const b = values.integrations.bigcommerce;
-        if (s.enabled) {
-          const syncs = Object.entries(s.sync).filter(([, v]) => v).map(([k]) => k);
-          parts.push(`Shopify (${s.storeUrl || '—'}${syncs.length ? ` · ${syncs.join('/')}` : ''})`);
-        }
-        if (b.enabled) {
-          const syncs = Object.entries(b.sync).filter(([, v]) => v).map(([k]) => k);
-          parts.push(`BigCommerce (${b.storeHash || '—'}${syncs.length ? ` · ${syncs.join('/')}` : ''})`);
-        }
-        return `Middleware · ${parts.length ? parts.join(' · ') : 'no platforms selected'}`;
+        const platform =
+          values.integrationType === 'shopify'
+            ? 'Shopify'
+            : values.integrationType === 'bigcommerce'
+              ? 'BigCommerce'
+              : 'no platform selected';
+        return `Middleware · ${platform}`;
       })(),
     ],
     ['Plan', `${values.planTier} · ${values.userSeats} seats`],

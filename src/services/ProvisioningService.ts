@@ -858,18 +858,6 @@ export class ProvisioningService {
           'middleware selected but no platform enabled',
         );
       }
-      if (shopify.enabled && !shopify.storeUrl) {
-        throw new ProvisioningError(
-          'Please enter the Shopify store URL.',
-          'shopify enabled but storeUrl missing',
-        );
-      }
-      if (bigcommerce.enabled && !bigcommerce.storeHash) {
-        throw new ProvisioningError(
-          'Please enter the BigCommerce store hash.',
-          'bigcommerce enabled but storeHash missing',
-        );
-      }
     }
     return input;
   }
@@ -946,6 +934,42 @@ export class ProvisioningService {
           shortId: newShortId(),
         };
       }
+    }
+
+    // Slug-collision recovery: a stale non-READY row with the same slug means
+    // an earlier provisioning attempt crashed before reaching READY (e.g. the
+    // user refreshed the page, losing the in-memory provisioningId, and
+    // resubmitted). stepSlugCheck already cleared this as reusable — adopt it
+    // here instead of hitting the unique-slug constraint on create.
+    const existingBySlug = await prisma.client.findUnique({
+      where: { slug: input.slug },
+    });
+    if (existingBySlug && existingBySlug.status !== 'READY') {
+      await prisma.client.update({
+        where: { id: existingBySlug.id },
+        data: {
+          status: 'PENDING',
+          failureStep: null,
+          friendlyError: null,
+          referenceId: null,
+          previewSessionId: null,
+          name: input.name,
+          provisionedBy: input.provisionedBy,
+          ...sharedFields,
+        },
+      });
+      await prisma.auditLog.create({
+        data: {
+          actorLogin: input.provisionedBy,
+          action: 'CLIENT_RETRIED',
+          targetSlug: input.slug,
+        },
+      });
+      return {
+        clientId: existingBySlug.id,
+        provisioningId: existingBySlug.provisioningId,
+        shortId: newShortId(),
+      };
     }
 
     // Honour a client-generated provisioningId when provided. This lets the UI

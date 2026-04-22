@@ -100,82 +100,51 @@ const onboardFormSchema = z.object({
   sidebarTheme: z.enum(['navy', 'zoho', 'slate', 'neutral']).default('navy'),
 
   dashboardType: z.enum(['custom', 'middleware', 'saas']),
-  integrations: z
-    .object({
-      shopify: z.object({
-        enabled: z.boolean(),
-        storeUrl: z.preprocess(
-          emptyToUndef,
-          z
-            .string()
-            .regex(
-              /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i,
-              'Enter the .myshopify.com domain (e.g. acme.myshopify.com).',
-            )
-            .optional(),
-        ),
-        accessToken: z.preprocess(
-          emptyToUndef,
-          z.string().min(10, 'Access token looks too short.').optional(),
-        ),
-        webhookSecret: z.preprocess(emptyToUndef, z.string().optional()),
-        sync: z.object({
-          products: z.boolean(),
-          orders: z.boolean(),
-          customers: z.boolean(),
-        }),
+  integrations: z.object({
+    shopify: z.object({
+      enabled: z.boolean(),
+      storeUrl: z.preprocess(
+        emptyToUndef,
+        z
+          .string()
+          .regex(
+            /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i,
+            'Enter the .myshopify.com domain (e.g. acme.myshopify.com).',
+          )
+          .optional(),
+      ),
+      accessToken: z.preprocess(
+        emptyToUndef,
+        z.string().min(10, 'Access token looks too short.').optional(),
+      ),
+      webhookSecret: z.preprocess(emptyToUndef, z.string().optional()),
+      sync: z.object({
+        products: z.boolean(),
+        orders: z.boolean(),
+        customers: z.boolean(),
       }),
-      bigcommerce: z.object({
-        enabled: z.boolean(),
-        storeHash: z.preprocess(
-          emptyToUndef,
-          z
-            .string()
-            .regex(/^[a-z0-9]{6,16}$/i, 'Store hash is the short alphanumeric string from your store URL.')
-            .optional(),
-        ),
-        accessToken: z.preprocess(
-          emptyToUndef,
-          z.string().min(10, 'Access token looks too short.').optional(),
-        ),
-        clientId: z.preprocess(emptyToUndef, z.string().optional()),
-        sync: z.object({
-          products: z.boolean(),
-          orders: z.boolean(),
-          customers: z.boolean(),
-        }),
-      }),
-    })
-    .superRefine((val, ctx) => {
-      if (val.shopify.enabled) {
-        if (!val.shopify.storeUrl)
-          ctx.addIssue({
-            code: 'custom',
-            path: ['shopify', 'storeUrl'],
-            message: 'Shopify store URL is required.',
-          });
-        if (!val.shopify.accessToken)
-          ctx.addIssue({
-            code: 'custom',
-            path: ['shopify', 'accessToken'],
-            message: 'Shopify Admin API access token is required.',
-          });
-      }
-      if (val.bigcommerce.enabled) {
-        if (!val.bigcommerce.storeHash)
-          ctx.addIssue({
-            code: 'custom',
-            path: ['bigcommerce', 'storeHash'],
-            message: 'BigCommerce store hash is required.',
-          });
-        if (!val.bigcommerce.accessToken)
-          ctx.addIssue({
-            code: 'custom',
-            path: ['bigcommerce', 'accessToken'],
-            message: 'BigCommerce API access token is required.',
-          });
-      }
     }),
+    bigcommerce: z.object({
+      enabled: z.boolean(),
+      storeHash: z.preprocess(
+        emptyToUndef,
+        z
+          .string()
+          .regex(/^[a-z0-9]{6,16}$/i, 'Store hash is the short alphanumeric string from your store URL.')
+          .optional(),
+      ),
+      accessToken: z.preprocess(
+        emptyToUndef,
+        z.string().min(10, 'Access token looks too short.').optional(),
+      ),
+      clientId: z.preprocess(emptyToUndef, z.string().optional()),
+      sync: z.object({
+        products: z.boolean(),
+        orders: z.boolean(),
+        customers: z.boolean(),
+      }),
+    }),
+  }),
 
   enabledModules: z.array(z.string().min(1)).min(1, 'Please select at least one module.'),
   planTier: z.enum(['starter', 'pro', 'enterprise']),
